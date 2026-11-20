@@ -1,0 +1,83 @@
+# Production-like stack. Secrets come from .env (never committed).
+# Start:   docker compose up -d --build
+# Migrate: docker compose run --rm migrate   (also runs automatically before web/worker start)
+name: kezvra
+
+x-app-env: &app-env
+  env_file: .env
+  environment:
+    DATABASE_URL: postgresql://${POSTGRES_USER:-kezvra}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-kezvra}
+    REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-kezvra}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-kezvra}
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    deploy: { resources: { limits: { cpus: "2", memory: 2g } } }
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    # AOF persistence for BullMQ jobs; noeviction is required by BullMQ.
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "noeviction", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD}"]
+    volumes: [redisdata:/data]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a $$REDIS_PASSWORD ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    deploy: { resources: { limits: { cpus: "1", memory: 768m } } }
+
+  migrate:
+    build: { context: ., target: worker }
+    <<: *app-env
+    command: ["pnpm", "prisma", "migrate", "deploy"]
+    depends_on: { postgres: { condition: service_healthy } }
+    restart: "no"
+
+  web:
+    build: { context: ., target: web }
+    restart: unless-stopped
+    <<: *app-env
+    ports: ["127.0.0.1:3000:3000"]   # exposed only to the reverse proxy on the host
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    stop_grace_period: 30s
+    deploy: { resources: { limits: { cpus: "2", memory: 1g } } }
+
+  worker:
+    build: { context: ., target: worker }
+    restart: unless-stopped
+    <<: *app-env
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    stop_grace_period: 40s
+    deploy: { resources: { limits: { cpus: "1", memory: 1g } } }
+
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+    profiles: ["https"]
+
+volumes:
+  pgdata:
+  redisdata:
+  caddydata:

@@ -1,0 +1,139 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+@import "katex/dist/katex.min.css";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+ * Kezvra design tokens. Quiet graphite chrome; the brand violet is an accent only.
+ * Richness lives in content: the per-request cost receipt (mono) is the signature detail.
+ */
+:root {
+  /* graphite ramp, light */
+  --bg: #fafafa;
+  --surface: #ffffff;
+  --elevated: #f4f4f5;
+  --border: rgb(23 23 23 / 0.09);
+  --text: #171717;
+  --muted: #525252;
+  --faint: #737373;
+  /* brand violet: accent only (links, selection, one key figure) */
+  --primary: #6d28d9;
+  --primary-strong: #6d28d9;
+  --btn: #171717;
+  --btn-fg: #fafafa;
+  --secondary: #4f46e5;
+  --ring: #7c3aed;
+  --danger: #dc2626;
+  --success: #16a34a;
+  --warning: #b45309;
+  --code-bg: #f4f4f5;
+  color-scheme: light;
+}
+
+.dark {
+  /* graphite ramp, dark */
+  --bg: #141415;
+  --surface: #19191b;
+  --elevated: #232325;
+  --border: rgb(237 237 237 / 0.08);
+  --text: #ededed;
+  --muted: #a1a1a6;
+  --faint: #929298;
+  --primary: #a78bfa;
+  --primary-strong: #7c3aed;
+  --btn: #ededed;
+  --btn-fg: #141415;
+  --secondary: #818cf8;
+  --ring: #a78bfa;
+  --danger: #f2676b;
+  --success: #4cc38a;
+  --warning: #f5a524;
+  --code-bg: #0f0f10;
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-elevated: var(--elevated);
+  --color-border: var(--border);
+  --color-text: var(--text);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-btn: var(--btn);
+  --color-btn-fg: var(--btn-fg);
+  --color-primary: var(--primary);
+  --color-primary-strong: var(--primary-strong);
+  --color-secondary: var(--secondary);
+  --color-ring: var(--ring);
+  --color-danger: var(--danger);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-code: var(--code-bg);
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+  --radius-xl: 0.875rem;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --animate-shimmer: shimmer 1.6s linear infinite;
+  @keyframes shimmer {
+    from { background-position: -200% 0; }
+    to { background-position: 200% 0; }
+  }
+}
+
+@layer base {
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-feature-settings: "cv11", "ss01";
+    text-rendering: optimizeLegibility;
+  }
+  ::selection { background: color-mix(in oklab, var(--ring) 35%, transparent); }
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+  * { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+}
+
+@layer components {
+  .skeleton {
+    background: linear-gradient(90deg, var(--elevated) 25%, var(--surface) 37%, var(--elevated) 63%);
+    background-size: 400% 100%;
+    animation: var(--animate-shimmer);
+    border-radius: 0.5rem;
+  }
+  .prose-kz {
+    @apply prose prose-sm max-w-none dark:prose-invert;
+    --tw-prose-body: var(--text);
+    --tw-prose-headings: var(--text);
+    --tw-prose-links: var(--primary);
+    --tw-prose-code: var(--text);
+    --tw-prose-pre-bg: var(--code-bg);
+  }
+  .prose-kz pre { border: 1px solid var(--border); padding: 0; }
+  .prose-kz :where(h1,h2,h3,h4) { font-weight: 500; }
+  .prose-kz :not(pre) > code { background: var(--code-bg); padding: 0.1rem 0.35rem; border-radius: 0.3rem; font-weight: 500; }
+  .prose-kz :not(pre) > code::before, .prose-kz :not(pre) > code::after { content: none; }
+  .prose-kz table { display: block; overflow-x: auto; }
+}
+
+/* Syntax highlighting (highlight.js tokens) */
+.hljs-comment, .hljs-quote { color: #64748b; font-style: italic; }
+.hljs-keyword, .hljs-selector-tag, .hljs-built_in { color: #a78bfa; }
+.hljs-string, .hljs-attr, .hljs-template-tag { color: #34d399; }
+.hljs-number, .hljs-literal { color: #f59e0b; }
+.hljs-title, .hljs-function .hljs-title, .hljs-section { color: #60a5fa; }
+.hljs-type, .hljs-class .hljs-title { color: #f472b6; }
+.hljs-variable, .hljs-params { color: inherit; }
+:root:not(.dark) .hljs-keyword { color: #7c3aed; }
+:root:not(.dark) .hljs-string { color: #047857; }
+:root:not(.dark) .hljs-number { color: #b45309; }
+:root:not(.dark) .hljs-title { color: #1d4ed8; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
+}

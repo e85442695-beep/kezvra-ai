@@ -1,0 +1,795 @@
+// Kezvra AI — database schema
+// Money conventions (see docs/ARCHITECTURE.md#money):
+//   * USD amounts are BigInt picoUSD (1 USD = 1_000_000_000_000)
+//   * Credits are BigInt microcredits (1 credit = 1_000_000)
+//   * No floating point is ever used for balances or charges.
+
+generator client {
+  provider        = "prisma-client"
+  output          = "../src/generated/prisma"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  extensions = [vector]
+}
+
+// ───────────────────────────── Identity ─────────────────────────────
+
+enum Role {
+  USER
+  MODERATOR
+  ADMIN
+  SUPER_ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  BANNED
+  DELETED
+}
+
+model User {
+  id                 String     @id @default(cuid())
+  email              String     @unique
+  emailVerified      DateTime?
+  name               String?
+  image              String?
+  passwordHash       String?
+  role               Role       @default(USER)
+  status             UserStatus @default(ACTIVE)
+  locale             String     @default("uk")
+  theme              String     @default("system")
+  referralCode       String     @unique
+  failedLoginCount   Int        @default(0)
+  lockedUntil        DateTime?
+  favoriteModelIds   String[]   @default([])
+  defaultModelId     String?
+  signupIp           String?
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+  deletedAt          DateTime?
+
+  accounts           Account[]
+  sessions           Session[]
+  chats              Chat[]
+  folders            ChatFolder[]
+  aiRequests         AIRequest[]
+  images             ImageGeneration[]
+  files              StoredFile[]
+  wallet             Wallet?
+  payments           Payment[]
+  referralsMade      Referral[]        @relation("Referrer")
+  referredBy         Referral?         @relation("Referred")
+  referralRewards    ReferralReward[]
+  apiKeys            ApiKey[]
+  notifications      Notification[]
+  auditLogs          AuditLog[]        @relation("AuditActor")
+  adminActions       AdminAction[]     @relation("AdminActor")
+  adminActionsTarget AdminAction[]     @relation("AdminTarget")
+  assistants         Assistant[]
+  prompts            SavedPrompt[]
+  tickets            SupportTicket[]
+  ticketMessages     SupportMessage[]
+
+  @@index([createdAt])
+  @@index([status])
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+/// Database sessions (Auth.js "database" strategy) — enables listing and revoking devices.
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  userAgent    String?
+  ip           String?
+  createdAt    DateTime @default(now())
+  lastSeenAt   DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+/// Email verification + password reset tokens. Only the SHA-256 hash of the token is stored.
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+  purpose    String   @default("verify-email")
+
+  @@unique([identifier, token])
+}
+
+// ───────────────────────────── Chat ─────────────────────────────
+
+model ChatFolder {
+  id        String   @id @default(cuid())
+  userId    String
+  name      String
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+
+  user  User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chats Chat[]
+
+  @@index([userId])
+}
+
+model Chat {
+  id            String    @id @default(cuid())
+  userId        String
+  folderId      String?
+  assistantId   String?
+  title         String    @default("New chat")
+  modelId       String
+  systemPrompt  String?   @db.Text
+  temperature   Decimal?  @db.Decimal(3, 2)
+  maxTokens     Int?
+  pinned        Boolean   @default(false)
+  archived      Boolean   @default(false)
+  shareToken    String?   @unique
+  shareEnabled  Boolean   @default(false)
+  shareExpires  DateTime?
+  clonedFromId  String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  lastMessageAt DateTime  @default(now())
+
+  user      User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  folder    ChatFolder?   @relation(fields: [folderId], references: [id], onDelete: SetNull)
+  assistant Assistant?    @relation(fields: [assistantId], references: [id], onDelete: SetNull)
+  messages  ChatMessage[]
+  files     ChatFile[]
+
+  @@index([userId, archived, lastMessageAt(sort: Desc)])
+  @@index([userId, pinned])
+}
+
+enum MessageRole {
+  system
+  user
+  assistant
+}
+
+enum MessageStatus {
+  PENDING
+  STREAMING
+  COMPLETE
+  STOPPED
+  ERROR
+}
+
+model ChatMessage {
+  id          String        @id @default(cuid())
+  chatId      String
+  role        MessageRole
+  content     String        @db.Text
+  modelId     String?
+  status      MessageStatus @default(COMPLETE)
+  error       String?
+  /// Attachments: [{ fileId, name, mime }]
+  attachments Json?
+  parentId    String?
+  /// Superseded messages (edited / regenerated) are kept for history but excluded from context.
+  superseded  Boolean       @default(false)
+  aiRequestId String?       @unique
+  latencyMs   Int?
+  createdAt   DateTime      @default(now())
+
+  chat      Chat       @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  aiRequest AIRequest? @relation(fields: [aiRequestId], references: [id], onDelete: SetNull)
+
+  @@index([chatId, createdAt])
+}
+
+model ChatFile {
+  chatId String
+  fileId String
+
+  chat Chat       @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  file StoredFile @relation(fields: [fileId], references: [id], onDelete: Cascade)
+
+  @@id([chatId, fileId])
+}
+
+model Assistant {
+  id           String   @id @default(cuid())
+  userId       String
+  name         String
+  description  String?
+  systemPrompt String   @db.Text
+  modelId      String
+  temperature  Decimal? @db.Decimal(3, 2)
+  isPublic     Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user  User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chats Chat[]
+
+  @@index([userId])
+}
+
+model SavedPrompt {
+  id         String   @id @default(cuid())
+  userId     String?
+  /// null userId + isTemplate = global template managed by admins
+  isTemplate Boolean  @default(false)
+  title      String
+  content    String   @db.Text
+  category   String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([isTemplate])
+}
+
+// ───────────────────────────── Models & requests ─────────────────────────────
+
+model AIModel {
+  id                 String    @id // OpenRouter model id, e.g. "openai/gpt-4o"
+  canonicalSlug      String?
+  name               String
+  provider           String
+  description        String?   @db.Text
+  contextLength      Int?
+  maxCompletion      Int?
+  /// Prices in picoUSD per token (from OpenRouter, string → BigInt exact)
+  promptPricePico    BigInt    @default(0)
+  completionPricePico BigInt   @default(0)
+  imagePricePico     BigInt    @default(0)
+  requestPricePico   BigInt    @default(0)
+  inputModalities    String[]  @default([])
+  outputModalities   String[]  @default([])
+  supportedParams    String[]  @default([])
+  /// Image models: real options from OpenRouter /images/models (aspect ratios, max input references…)
+  imageOptions       Json?
+  categories         String[]  @default([])
+  isFree             Boolean   @default(false)
+  /// Admin controls
+  enabled            Boolean   @default(true)
+  featured           Boolean   @default(false)
+  markupBps          Int?      // overrides global markup when set (basis points, 2500 = +25%)
+  /// Availability (upstream)
+  available          Boolean   @default(true)
+  lastSyncedAt       DateTime  @default(now())
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  requests AIRequest[]
+
+  @@index([enabled, available])
+  @@index([provider])
+}
+
+enum AIRequestKind {
+  CHAT
+  COMPARE
+  IMAGE
+  FILE_ANALYSIS
+  EMBEDDING
+  API
+}
+
+enum AIRequestStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+model AIRequest {
+  id                 String          @id @default(cuid())
+  userId             String
+  modelId            String
+  kind               AIRequestKind
+  status             AIRequestStatus @default(PENDING)
+  apiKeyId           String?
+  upstreamId         String?         // OpenRouter generation id
+  promptTokens       Int             @default(0)
+  completionTokens   Int             @default(0)
+  /// Actual upstream cost, picoUSD
+  costPico           BigInt          @default(0)
+  /// Credits charged, microcredits
+  chargedMicro       BigInt          @default(0)
+  /// Pricing snapshot fixed at reservation time
+  pricingSnapshot    Json
+  reservationId      String?         @unique
+  latencyMs          Int?
+  error              String?
+  createdAt          DateTime        @default(now())
+  completedAt        DateTime?
+
+  user        User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  model       AIModel           @relation(fields: [modelId], references: [id])
+  apiKey      ApiKey?           @relation(fields: [apiKeyId], references: [id], onDelete: SetNull)
+  reservation CreditReservation? @relation(fields: [reservationId], references: [id])
+  message     ChatMessage?
+  image       ImageGeneration?
+  apiUsage    ApiUsage?
+
+  @@index([userId, createdAt])
+  @@index([modelId, createdAt])
+  @@index([status, createdAt])
+  @@index([createdAt])
+}
+
+enum ImageJobStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+model ImageGeneration {
+  id            String         @id @default(cuid())
+  userId        String
+  modelId       String
+  prompt        String         @db.Text
+  aspectRatio   String         @default("1:1")
+  sourceFileId  String?
+  status        ImageJobStatus @default(QUEUED)
+  /// S3 keys of result images
+  resultKeys    String[]       @default([])
+  error         String?
+  aiRequestId   String?        @unique
+  createdAt     DateTime       @default(now())
+  completedAt   DateTime?
+
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  aiRequest AIRequest?  @relation(fields: [aiRequestId], references: [id], onDelete: SetNull)
+  source    StoredFile? @relation(fields: [sourceFileId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+}
+
+// ───────────────────────────── Files ─────────────────────────────
+
+enum FileStatus {
+  UPLOADED
+  PROCESSING
+  READY
+  FAILED
+}
+
+model StoredFile {
+  id          String     @id @default(cuid())
+  userId      String
+  name        String
+  mime        String
+  sizeBytes   Int
+  storageKey  String     @unique
+  sha256      String
+  status      FileStatus @default(UPLOADED)
+  error       String?
+  textLength  Int        @default(0)
+  pageCount   Int?
+  summary     String?    @db.Text
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  user   User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chunks FileChunk[]
+  chats  ChatFile[]
+  images ImageGeneration[]
+
+  @@index([userId, createdAt])
+}
+
+model FileChunk {
+  id        String                       @id @default(cuid())
+  fileId    String
+  index     Int
+  content   String                       @db.Text
+  tokens    Int
+  embedding Unsupported("vector(1536)")?
+
+  file StoredFile @relation(fields: [fileId], references: [id], onDelete: Cascade)
+
+  @@unique([fileId, index])
+}
+
+// ───────────────────────────── Credits ledger ─────────────────────────────
+
+model Wallet {
+  id               String   @id @default(cuid())
+  userId           String   @unique
+  /// All microcredits. Available = bonus + purchased. Reserved funds are already removed from buckets.
+  bonusBalance     BigInt   @default(0)
+  purchasedBalance BigInt   @default(0)
+  reservedBalance  BigInt   @default(0)
+  /// Daily/monthly spend caps (microcredits); null = no cap
+  dailySpendLimit  BigInt?
+  version          Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  user         User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions WalletTransaction[]
+  reservations CreditReservation[]
+}
+
+enum TxType {
+  SIGNUP_BONUS
+  PURCHASE
+  REFERRAL_BONUS
+  PROMO_BONUS
+  ADMIN_ADJUSTMENT
+  RESERVE
+  RELEASE
+  CHARGE
+  REFUND
+  CHARGEBACK
+  EXPIRY
+}
+
+enum CreditBucket {
+  BONUS
+  PURCHASED
+  RESERVED
+}
+
+/// Append-only ledger. Never updated or deleted.
+model WalletTransaction {
+  id             String       @id @default(cuid())
+  walletId       String
+  type           TxType
+  bucket         CreditBucket
+  /// signed microcredits applied to `bucket`
+  amount         BigInt
+  balanceAfter   BigInt
+  /// Ensures each business operation is applied at most once
+  idempotencyKey String       @unique
+  reservationId  String?
+  paymentId      String?
+  aiRequestId    String?
+  actorId        String?
+  note           String?
+  createdAt      DateTime     @default(now())
+
+  wallet      Wallet             @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  reservation CreditReservation? @relation(fields: [reservationId], references: [id])
+  payment     Payment?           @relation(fields: [paymentId], references: [id])
+
+  @@index([walletId, createdAt])
+  @@index([paymentId])
+  @@index([type, createdAt])
+}
+
+enum ReservationStatus {
+  HELD
+  SETTLED
+  RELEASED
+}
+
+model CreditReservation {
+  id               String            @id @default(cuid())
+  walletId         String
+  amount           BigInt
+  fromBonus        BigInt
+  fromPurchased    BigInt
+  chargedAmount    BigInt            @default(0)
+  status           ReservationStatus @default(HELD)
+  reason           String
+  expiresAt        DateTime
+  createdAt        DateTime          @default(now())
+  settledAt        DateTime?
+
+  wallet       Wallet              @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  transactions WalletTransaction[]
+  aiRequest    AIRequest?
+
+  @@index([status, expiresAt])
+  @@index([walletId, status])
+}
+
+// ───────────────────────────── Payments ─────────────────────────────
+
+enum PaymentProvider {
+  STRIPE
+  TELEGRAM_STARS
+  MANUAL
+}
+
+enum PaymentStatus {
+  CREATED
+  PENDING
+  SUCCEEDED
+  FAILED
+  CANCELED
+  REFUNDED
+  PARTIALLY_REFUNDED
+  DISPUTED
+}
+
+model CreditPackage {
+  id           String          @id @default(cuid())
+  slug         String          @unique
+  name         String
+  description  String?
+  provider     PaymentProvider
+  /// For fiat providers: minor units (cents). For Telegram Stars: number of Stars.
+  priceAmount  Int
+  currency     String          // "usd", "eur", or "XTR" for Telegram Stars
+  credits      BigInt          // microcredits granted
+  bonusCredits BigInt          @default(0)
+  active       Boolean         @default(true)
+  sortOrder    Int             @default(0)
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  payments Payment[]
+
+  @@index([provider, active])
+}
+
+model Payment {
+  id                String          @id @default(cuid())
+  userId            String
+  packageId         String?
+  provider          PaymentProvider
+  status            PaymentStatus   @default(CREATED)
+  /// provider-side id (Stripe Checkout Session id / Telegram charge id)
+  providerRef       String?
+  providerPaymentId String?         // Stripe PaymentIntent id
+  amount            Int
+  currency          String
+  creditsGranted    BigInt          @default(0)
+  bonusGranted      BigInt          @default(0)
+  refundedAmount    Int             @default(0)
+  receiptUrl        String?
+  /// Snapshot of the package at purchase time
+  packageSnapshot   Json
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+  completedAt       DateTime?
+
+  user         User                @relation(fields: [userId], references: [id], onDelete: Restrict)
+  package      CreditPackage?      @relation(fields: [packageId], references: [id], onDelete: SetNull)
+  events       PaymentEvent[]
+  transactions WalletTransaction[]
+
+  @@unique([provider, providerRef])
+  @@index([userId, createdAt])
+  @@index([status])
+  @@index([providerPaymentId])
+}
+
+/// Raw webhook events — unique per provider event id (dedupe).
+model PaymentEvent {
+  id              String          @id @default(cuid())
+  provider        PaymentProvider
+  providerEventId String
+  type            String
+  paymentId       String?
+  processedAt     DateTime?
+  error           String?
+  /// Payload with sensitive fields stripped
+  payload         Json
+  createdAt       DateTime        @default(now())
+
+  payment Payment? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+
+  @@unique([provider, providerEventId])
+}
+
+// ───────────────────────────── Referrals ─────────────────────────────
+
+enum ReferralStatus {
+  PENDING
+  QUALIFIED
+  REWARDED
+  REJECTED
+}
+
+model Referral {
+  id           String         @id @default(cuid())
+  referrerId   String
+  referredId   String         @unique
+  status       ReferralStatus @default(PENDING)
+  rejectReason String?
+  signupIp     String?
+  createdAt    DateTime       @default(now())
+  qualifiedAt  DateTime?
+
+  referrer User             @relation("Referrer", fields: [referrerId], references: [id], onDelete: Cascade)
+  referred User             @relation("Referred", fields: [referredId], references: [id], onDelete: Cascade)
+  rewards  ReferralReward[]
+
+  @@index([referrerId, status])
+}
+
+model ReferralReward {
+  id         String   @id @default(cuid())
+  referralId String
+  userId     String
+  amount     BigInt
+  kind       String   // "referrer" | "referred"
+  createdAt  DateTime @default(now())
+
+  referral Referral @relation(fields: [referralId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([referralId, kind])
+}
+
+// ───────────────────────────── Developer API ─────────────────────────────
+
+model ApiKey {
+  id             String    @id @default(cuid())
+  userId         String
+  name           String
+  /// first chars shown in UI, e.g. "kz_live_ab12"
+  prefix         String
+  /// SHA-256 of the full key (keys are high-entropy so a fast hash is appropriate)
+  hash           String    @unique
+  scopes         String[]  @default(["chat"])
+  allowedModels  String[]  @default([])
+  /// microcredits; null = unlimited (still bounded by balance)
+  spendLimit     BigInt?
+  spent          BigInt    @default(0)
+  rateLimitRpm   Int       @default(60)
+  lastUsedAt     DateTime?
+  expiresAt      DateTime?
+  revokedAt      DateTime?
+  createdAt      DateTime  @default(now())
+
+  user     User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  usage    ApiUsage[]
+  requests AIRequest[]
+
+  @@index([userId])
+}
+
+model ApiUsage {
+  id               String   @id @default(cuid())
+  apiKeyId         String
+  aiRequestId      String   @unique
+  endpoint         String
+  promptTokens     Int
+  completionTokens Int
+  chargedMicro     BigInt
+  statusCode       Int
+  createdAt        DateTime @default(now())
+
+  apiKey    ApiKey    @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+  aiRequest AIRequest @relation(fields: [aiRequestId], references: [id], onDelete: Cascade)
+
+  @@index([apiKeyId, createdAt])
+}
+
+// ───────────────────────────── Platform ─────────────────────────────
+
+model Notification {
+  id        String    @id @default(cuid())
+  userId    String?
+  /// null userId = broadcast announcement
+  title     String
+  body      String    @db.Text
+  kind      String    @default("info")
+  link      String?
+  readAt    DateTime?
+  expiresAt DateTime?
+  createdAt DateTime  @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+}
+
+model SystemSetting {
+  key       String   @id
+  value     Json
+  updatedBy String?
+  updatedAt DateTime @updatedAt
+}
+
+/// Security & data audit trail (logins, key creation, deletions, etc.)
+model AuditLog {
+  id        String   @id @default(cuid())
+  actorId   String?
+  action    String
+  target    String?
+  ip        String?
+  userAgent String?
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  actor User? @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([actorId, createdAt])
+  @@index([action, createdAt])
+}
+
+/// Every privileged admin mutation. Rows are immutable.
+model AdminAction {
+  id           String   @id @default(cuid())
+  adminId      String
+  targetUserId String?
+  action       String
+  reason       String
+  before       Json?
+  after        Json?
+  createdAt    DateTime @default(now())
+
+  admin      User  @relation("AdminActor", fields: [adminId], references: [id], onDelete: Restrict)
+  targetUser User? @relation("AdminTarget", fields: [targetUserId], references: [id], onDelete: SetNull)
+
+  @@index([adminId, createdAt])
+  @@index([targetUserId])
+}
+
+enum TicketStatus {
+  OPEN
+  PENDING
+  RESOLVED
+  CLOSED
+}
+
+model SupportTicket {
+  id        String       @id @default(cuid())
+  userId    String
+  subject   String
+  status    TicketStatus @default(OPEN)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  user     User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages SupportMessage[]
+
+  @@index([userId])
+  @@index([status])
+}
+
+model SupportMessage {
+  id        String   @id @default(cuid())
+  ticketId  String
+  authorId  String
+  body      String   @db.Text
+  isStaff   Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  ticket SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  author User          @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId, createdAt])
+}
+
+model ErrorLog {
+  id        String   @id @default(cuid())
+  source    String
+  message   String
+  stack     String?  @db.Text
+  context   Json?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+}

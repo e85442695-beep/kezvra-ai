@@ -1,0 +1,25 @@
+# HTTPS reverse proxy. Caddy obtains and renews Let's Encrypt certificates automatically.
+# Replace kezvra.example.com with your domain (DNS A/AAAA record must point to this server).
+kezvra.example.com {
+	encode zstd gzip
+
+	# SSE streams (chat, compare, API) must not be buffered.
+	@stream path /api/chats/*/messages /api/compare /api/v1/chat/completions
+	reverse_proxy @stream 127.0.0.1:3000 {
+		flush_interval -1
+		transport http {
+			read_timeout 330s
+		}
+	}
+
+	reverse_proxy 127.0.0.1:3000
+
+	request_body {
+		max_size 30MB
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}
